@@ -1,0 +1,121 @@
+name: Build Driver App APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "APK build type"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.35.7"
+          channel: stable
+          cache: true
+
+      - name: Verify Flutter
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # Your Gradle release configuration requires android/key.properties.
+      # If production signing secrets are supplied, use them.
+      # Otherwise, create a temporary signing key so a directly-installable
+      # release APK can still be built. DO NOT use the temporary key for
+      # publishing/updating an existing Google Play application.
+      - name: Configure Android signing
+        if: ${{ inputs.build_type == 'release' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > android/upload-keystore.jks
+            cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+            echo "Production signing keystore configured from GitHub Secrets."
+          else
+            keytool -genkeypair \
+              -v \
+              -keystore android/upload-keystore.jks \
+              -alias driver-release \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass changeit \
+              -keypass changeit \
+              -dname "CN=Supreme Panel Driver App, OU=Mobile, O=Supreme Panel, L=Monrovia, ST=Montserrado, C=LR"
+
+            cat > android/key.properties <<EOF
+          storePassword=changeit
+          keyPassword=changeit
+          keyAlias=driver-release
+          storeFile=upload-keystore.jks
+          EOF
+            echo "Temporary signing key generated. This APK is for direct installation/testing."
+          fi
+
+      - name: Clean project
+        run: flutter clean
+
+      - name: Build release APK
+        if: ${{ inputs.build_type == 'release' }}
+        run: flutter build apk --release --build-name=3.7.0 --build-number=7
+
+      - name: Build debug APK
+        if: ${{ inputs.build_type == 'debug' }}
+        run: flutter build apk --debug --build-name=3.7.0 --build-number=7
+
+      - name: Prepare APK artifact
+        run: |
+          mkdir -p dist
+
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            cp build/app/outputs/flutter-apk/app-release.apk \
+              dist/driver_app_v3.7.0-release.apk
+          else
+            cp build/app/outputs/flutter-apk/app-debug.apk \
+              dist/driver_app_v3.7.0-debug.apk
+          fi
+
+          ls -lh dist
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: driver-app-v3.7.0-${{ inputs.build_type }}-apk
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 30
